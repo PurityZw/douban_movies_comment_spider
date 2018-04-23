@@ -2,19 +2,22 @@
 from utlis.utlis import SpiderVariable
 from lxml import etree
 from bs4 import BeautifulSoup
+import threading
+from queue import Queue
 import requests
 import pymongo
-
+import time
 
 
 class CommentSpider(object):
     def __init__(self):
-        self.root_url = 'https://movie.douban.com/top250'
+        self.url_list = ['https://movie.douban.com/top250?start=%s&filter=' % str(page) for page in range(0, 226, 25)]
         self.proxy_addr = SpiderVariable().get_random_proxy_addr()
         self.user_agent = SpiderVariable().get_random_user_agent()
         self.parse_role = "//ol[@class='grid_view']/li[1]//span[@class='title']"
+        self.data_queue = Queue()
         self.headers = {
-            'User-Agent': self.user_agent
+            "User-Agent": self.user_agent
         }
 
     def send_request(self, url):
@@ -26,8 +29,11 @@ class CommentSpider(object):
         print url
         try:
             response = requests.get(url, proxies={'http': 'http://' + self.proxy_addr}, headers=self.headers)
+            # 网络IO需要时间, 否则response为None, 存入队列
+            self.data_queue.put(response)
             print response
-            return response
+            # time.sleep(1)
+            # return response
         except Exception as e:
             print e
 
@@ -39,10 +45,11 @@ class CommentSpider(object):
         client = pymongo.MongoClient('mongodb://purity:mongodb@127.0.0.1:27017')
         db = client['myDB']
         collection = db['douban_movies_comment']
+        return collection
 
-    def save_mongo(self):
-        self.__open()
-
+    def save_mongo(self, data):
+        collection = self.__open()
+        collection.insert(data)
 
     def parse(self, response, parse_role):
         """
@@ -75,20 +82,32 @@ class CommentSpider(object):
         movie_dict['type'] = soup.find('p').contents[2].strip()
         # 评分
         movie_dict['score'] = soup.find('span', class_='rating_num').string
-        if soup.find('span', class_='inq').string:
+        try:
             movie_dict['quote'] = soup.find('span', class_='inq').string
-        print movie_dict
+        except Exception as e:
+            pass
         return movie_dict
 
-
     def main(self):
-        response = self.send_request(self.root_url)
-        with open('x.html', 'w') as f:
-            f.write(response.content)
-        parse_ol = self.parse(response.content, "//*[@id='content']/div/div[1]/ol/li")
-        for i in parse_ol:
-            movie_dict = self.save_top_info(etree.tostring(i))
-        self.save_mongo()
+        thread_list = []
+        for url in self.url_list:
+            t = threading.Thread(target=self.send_request, args=(url,))
+            t.start()
+            thread_list.append(t)
+        # 网络IO需要时间, 需要时间
+        time.sleep(1)
+
+        # 取出队列内容
+        response_list = []
+        while not self.data_queue.empty():
+            response_list.append(self.data_queue.get())
+
+        # 对取出后的response进行操作
+        for response in response_list:
+            parse_ol = self.parse(response.content, "//*[@id='content']/div/div[1]/ol/li")
+            for i in parse_ol:
+                movie_dict = self.save_top_info(etree.tostring(i))
+                self.save_mongo(movie_dict)
 
 
 if __name__ == '__main__':
